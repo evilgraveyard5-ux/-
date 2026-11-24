@@ -6,6 +6,454 @@ def main():
     game = Game(board_size=6)
     game.run()
 
-
+##game.py
 if __name__ == "__main__":
     main()
+
+import json
+from pathlib import Path
+from models import Board
+from players import HumanPlayer, BotPlayer, Player
+
+
+class Game:
+    """Контроллер игры (композиция: игроки и поля)."""
+
+    SAVE_FILE = Path("save_game.json")
+
+    def __init__(self, board_size: int = 6):
+        self._human = HumanPlayer("Игрок", Board(board_size))
+        self._bot = BotPlayer("Бот", Board(board_size))
+        self._radar_charges = 2
+        self._commands = {
+            "help": (self.cmd_help, "Показать список команд"),
+            "place": (self.cmd_place, "Расставить корабль: place <имя> <ряд> <кол> <длина 1..4> <h|v>"),
+            "shot": (self.cmd_shot, "Выстрел по полю бота: shot <ряд> <кол>"),
+            "scan": (self.cmd_scan, "Радар 2x2 по полю бота: scan <ряд> <кол>"),
+            "board": (self.cmd_board, "Показать своё поле и поле бота"),
+            "stats": (self.cmd_stats, "Статистика попаданий"),
+            "reset": (self.cmd_reset, "Начать новую игру и удалить сохранение"),
+            "exit": (self.cmd_exit, "Сохранить и выйти"),
+        }
+        self._load_state()
+        if not self._bot.board.ships:
+            self._setup_bot_ships()
+
+    def _setup_bot_ships(self):
+        presets = [
+            ("Катер", (0, 0), 1, "h"),
+            ("Эсминец", (2, 1), 2, "h"),
+            ("Крейсер", (4, 3), 2, "v"),
+        ]
+        for name, start, length, orient in presets:
+            try:
+                self._bot.board.place_ship(name, start, length, orient)
+            except ValueError:
+                pass
+
+    @staticmethod
+    def _parse_coord(r_str: str, c_str: str) -> tuple[int, int]:
+        try:
+            return int(r_str), int(c_str)
+        except ValueError as exc:
+            raise ValueError("Координаты должны быть целыми числами.") from exc
+
+    def cmd_help(self, args: list[str]):
+        print("\n=== КОМАНДЫ ===")
+        for name, (_, desc) in self._commands.items():
+            print(f"  {name:<8} — {desc}")
+
+    def cmd_place(self, args: list[str]):
+        if len(args) != 5:
+            raise ValueError("Формат: place <имя> <ряд> <кол> <длина> <h|v>")
+        name, r_s, c_s, len_s, orient = args
+        coord = self._parse_coord(r_s, c_s)
+        try:
+            length = int(len_s)
+        except ValueError as exc:
+            raise ValueError("Длина корабля должна быть числом.") from exc
+
+        ship = self._human.board.place_ship(name, coord, length, orient)
+        print(f"Поставлен: {ship}")
+
+    def _polymorphic_turn(self, attacker: Player, defender_board: Board, target: tuple[int, int]):
+        result = defender_board.receive_shot(target)
+        is_hit = result in ("hit", "sunk")
+        attacker.record_shot(is_hit)
+        messages = {
+            "miss": f"{attacker.name}: мимо по {target}.",
+            "hit": f"{attacker.name}: ПОПАДАНИЕ по {target}!",
+            "sunk": f"{attacker.name}: КОРАБЛЬ ПОТОПЛЕН на {target}!",
+        }
+        print(messages[result])
+
+    def cmd_shot(self, args: list[str]):
+        if len(args) != 2:
+            raise ValueError("Формат: shot <ряд> <кол>")
+        if not self._human.board.ships:
+            raise ValueError("Сначала поставь хотя бы один свой корабль командой place.")
+
+        target = self._parse_coord(args[0], args[1])
+        self._polymorphic_turn(self._human, self._bot.board, target)
+
+        if self._bot.board.all_sunk():
+            print("Победа! Все корабли бота потоплены.")
+            return
+
+        bot_target = self._bot.choose_target(self._human.board)
+        self._polymorphic_turn(self._bot, self._human.board, bot_target)
+
+        if self._human.board.all_sunk():
+            print("Поражение: бот потопил все твои корабли.")
+
+    def cmd_scan(self, args: list[str]):
+        if len(args) != 2:
+            raise ValueError("Формат: scan <ряд> <кол>")
+        if self._radar_charges <= 0:
+            raise ValueError("Заряды радара закончились.")
+        coord = self._parse_coord(args[0], args[1])
+        found = self._bot.board.scan_area(coord)
+        self._radar_charges -= 1
+        print(f"Радар в квадрате 2x2 от {coord} нашёл палуб: {found} (осталось сканов: {self._radar_charges})")
+
+    def cmd_board(self, args: list[str]):
+        print("\n--- ТВОЁ ПОЛЕ ---")
+        print(self._human.board.render(hide_ships=False))
+        print("\n--- ПОЛЕ БОТА ---")
+        print(self._bot.board.render(hide_ships=True))
+
+    def cmd_stats(self, args: list[str]):
+        print("\n--- СТАТИСТИКА ---")
+        for p in (self._human, self._bot):
+            print(p.info())
+
+    def cmd_reset(self, args: list[str]):
+        size = self._human.board.size
+        self._human = HumanPlayer("Игрок", Board(size))
+        self._bot = BotPlayer("Бот", Board(size))
+        self._radar_charges = 2
+        self._setup_bot_ships()
+        if self.SAVE_FILE.exists():
+            self.SAVE_FILE.unlink()
+        print("Игра сброшена.")
+
+    def cmd_exit(self, args: list[str]) -> bool:
+        self._save_state()
+        print(f"Состояние сохранено в {self.SAVE_FILE}. Выход.")
+        return True
+
+    def execute(self, raw_line: str) -> bool:
+        parts = raw_line.strip().split()
+        if not parts:
+            return False
+        cmd_name = parts[0].lower()
+        args = parts[1:]
+        if cmd_name not in self._commands:
+            raise ValueError(f"Неизвестная команда '{cmd_name}'. Введите 'help'.")
+        handler, _ = self._commands[cmd_name]
+        res = handler(args)
+        return bool(res)
+
+    def _save_state(self):
+        payload = {
+            "radar_charges": self._radar_charges,
+            "human": self._human.to_dict(),
+            "bot": self._bot.to_dict(),
+        }
+        self.SAVE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _load_state(self):
+        if not self.SAVE_FILE.exists():
+            return
+        try:
+            data = json.loads(self.SAVE_FILE.read_text(encoding="utf-8"))
+            self._radar_charges = data.get("radar_charges", 2)
+            h = data["human"]
+            b = data["bot"]
+            self._human = HumanPlayer(h["name"], Board.from_dict(h["board"]))
+            self._human._shots_fired = h.get("shots_fired", 0)
+            self._human._hits_count = h.get("hits_count", 0)
+            self._human._misses_count = h.get("misses_count", 0)
+
+            self._bot = BotPlayer(b["name"], Board.from_dict(b["board"]))
+            self._bot._shots_fired = b.get("shots_fired", 0)
+            self._bot._hits_count = b.get("hits_count", 0)
+            self._bot._misses_count = b.get("misses_count", 0)
+            print(f"Загружено сохранение из {self.SAVE_FILE}.")
+        except Exception as exc:
+            print(f"Не удалось загрузить сохранение ({exc}), старт с чистого листа.")
+
+    def __str__(self) -> str:
+        return f"Game(радар={self._radar_charges}, {self._human}, {self._bot})"
+
+    def run(self):
+        print("=== МОРСКОЙ БОЙ ===")
+        print("Введите 'help' для списка команд.")
+        while True:
+            try:
+                line = input("\n> ")
+                if self.execute(line):
+                    break
+            except ValueError as err:
+                print(f"[Ошибка ввода/действия]: {err}")
+            except Exception as err:
+                print(f"[Непредвиденная ошибка]: {err}")
+##models.py
+from abc import ABC, abstractmethod
+
+
+class Entity(ABC):
+    """Абстрактный базовый класс для сущностей на поле."""
+
+    def __init__(self, name: str):
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @abstractmethod
+    def info(self) -> str:
+        pass
+
+
+class Ship(Entity):
+    """Корабль с проверкой размера и координат через @property."""
+
+    def __init__(self, name: str, cells: list[tuple[int, int]]):
+        super().__init__(name)
+        self.cells = cells  # пойдёт через сеттер @cells.setter
+        self._hits: set[tuple[int, int]] = set()
+
+    @property
+    def cells(self) -> list[tuple[int, int]]:
+        return self._cells
+
+    @cells.setter
+    def cells(self, value: list[tuple[int, int]]):
+        if not value or not isinstance(value, list):
+            raise ValueError("Корабль должен занимать хотя бы одну клетку.")
+        if len(value) > 4:
+            raise ValueError("Размер корабля не может превышать 4 клетки.")
+        self._cells = value
+
+    @property
+    def is_sunk(self) -> bool:
+        return len(self._hits) >= len(self._cells)
+
+    def register_hit(self, coord: tuple[int, int]) -> str:
+        if coord in self._cells:
+            self._hits.add(coord)
+            return "sunk" if self.is_sunk else "hit"
+        return "miss"
+
+    def info(self) -> str:
+        status = "потоплен" if self.is_sunk else f"ранен ({len(self._hits)}/{len(self._cells)})"
+        return f"Корабль '{self._name}' [{status}]"
+
+    def __str__(self) -> str:
+        return self.info()
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self._name,
+            "cells": [list(c) for c in self._cells],
+            "hits": [list(h) for h in self._hits],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Ship":
+        ship = cls(data["name"], [tuple(c) for c in data["cells"]])
+        ship._hits = {tuple(h) for h in data.get("hits", [])}
+        return ship
+
+
+class Board:
+    """Игровое поле (композиция: хранит список объектов Ship)."""
+
+    def __init__(self, size: int = 6):
+        self.size = size
+        self._ships: list[Ship] = []
+        self._shots: dict[tuple[int, int], str] = {}  # (r, c) -> 'hit' | 'miss'
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    @size.setter
+    def size(self, value: int):
+        if not (4 <= value <= 10):
+            raise ValueError("Размер поля должен быть от 4 до 10.")
+        self._size = value
+
+    @property
+    def ships(self) -> list[Ship]:
+        return self._ships
+
+    def _in_bounds(self, r: int, c: int) -> bool:
+        return 0 <= r < self._size and 0 <= c < self._size
+
+    def place_ship(self, name: str, start: tuple[int, int], length: int, orientation: str) -> Ship:
+        if length < 1 or length > 4:
+            raise ValueError("Длина корабля должна быть от 1 до 4.")
+        orientation = orientation.lower()
+        if orientation not in ("h", "v"):
+            raise ValueError("Направление должно быть 'h' (горизонтально) или 'v' (вертикально).")
+
+        r0, c0 = start
+        cells = []
+        for i in range(length):
+            r = r0 + (i if orientation == "v" else 0)
+            c = c0 + (i if orientation == "h" else 0)
+            if not self._in_bounds(r, c):
+                raise ValueError("Корабль выходит за пределы поля.")
+            cells.append((r, c))
+
+        occupied = {cell for ship in self._ships for cell in ship.cells}
+        if any(cell in occupied for cell in cells):
+            raise ValueError("Клетки уже заняты другим кораблём.")
+
+        ship = Ship(name, cells)
+        self._ships.append(ship)
+        return ship
+
+    def receive_shot(self, coord: tuple[int, int]) -> str:
+        r, c = coord
+        if not self._in_bounds(r, c):
+            raise ValueError("Координата вне поля.")
+        if coord in self._shots:
+            raise ValueError("В эту клетку уже стреляли.")
+
+        for ship in self._ships:
+            if coord in ship.cells:
+                res = ship.register_hit(coord)
+                self._shots[coord] = "hit"
+                return res
+
+        self._shots[coord] = "miss"
+        return "miss"
+
+    def scan_area(self, top_left: tuple[int, int]) -> int:
+        """Своя фича: радар проверяет квадрат 2x2 и возвращает число палуб."""
+        r0, c0 = top_left
+        if not self._in_bounds(r0, c0):
+            raise ValueError("Координата радара вне поля.")
+        ship_cells = {cell for ship in self._ships for cell in ship.cells}
+        count = 0
+        for dr in range(2):
+            for dc in range(2):
+                cell = (r0 + dr, c0 + dc)
+                if self._in_bounds(*cell) and cell in ship_cells:
+                    count += 1
+        return count
+
+    def all_sunk(self) -> bool:
+        return len(self._ships) > 0 and all(ship.is_sunk for ship in self._ships)
+
+    def render(self, hide_ships: bool = False) -> str:
+        hit_cells = {ship_cell for ship in self._ships for ship_cell in ship._hits}
+        all_ship_cells = {cell for ship in self._ships for cell in ship.cells}
+
+        header = "   " + " ".join(str(c) for c in range(self._size))
+        lines = [header]
+        for r in range(self._size):
+            row_chars = [str(r)]
+            for c in range(self._size):
+                coord = (r, c)
+                if coord in hit_cells:
+                    row_chars.append("X")
+                elif coord in self._shots:
+                    row_chars.append("o")
+                elif not hide_ships and coord in all_ship_cells:
+                    row_chars.append("S")
+                else:
+                    row_chars.append(".")
+            lines.append("  " + " ".join(row_chars))
+        return "\n".join(lines)
+
+    def __str__(self) -> str:
+        return self.render(hide_ships=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "size": self._size,
+            "ships": [s.to_dict() for s in self._ships],
+            "shots": [[r, c, status] for (r, c), status in self._shots.items()],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Board":
+        board = cls(size=data.get("size", 6))
+        board._ships = [Ship.from_dict(s) for s in data.get("ships", [])]
+        board._shots = {(item[0], item[1]): item[2] for item in data.get("shots", [])}
+        return board
+##players.py
+import random
+from models import Entity, Board
+
+
+class Player(Entity):
+    """Базовый класс игрока со статистикой попаданий."""
+
+    def __init__(self, name: str, board: Board):
+        super().__init__(name)
+        self._board = board
+        self._shots_fired = 0
+        self._hits_count = 0
+        self._misses_count = 0
+
+    @property
+    def board(self) -> Board:
+        return self._board
+
+    def record_shot(self, is_hit: bool):
+        self._shots_fired += 1
+        if is_hit:
+            self._hits_count += 1
+        else:
+            self._misses_count += 1
+
+    def stats(self) -> str:
+        accuracy = (self._hits_count / self._shots_fired * 100) if self._shots_fired else 0.0
+        return (
+            f"{self._name}: выстрелов={self._shots_fired}, "
+            f"попаданий={self._hits_count}, промахов={self._misses_count}, "
+            f"точность={accuracy:.1f}%"
+        )
+
+    def info(self) -> str:
+        return self.stats()
+
+    def choose_target(self, enemy_board: Board) -> tuple[int, int]:
+        raise NotImplementedError("Подкласс должен реализовать choose_target.")
+
+    def __str__(self) -> str:
+        return f"Игрок '{self._name}'"
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.__class__.__name__,
+            "name": self._name,
+            "shots_fired": self._shots_fired,
+            "hits_count": self._hits_count,
+            "misses_count": self._misses_count,
+            "board": self._board.to_dict(),
+        }
+
+
+class HumanPlayer(Player):
+    def choose_target(self, enemy_board: Board) -> tuple[int, int]:
+        raise RuntimeError("Для человека цель задаётся командой shot.")
+
+
+class BotPlayer(Player):
+    def choose_target(self, enemy_board: Board) -> tuple[int, int]:
+        candidates = [
+            (r, c)
+            for r in range(enemy_board.size)
+            for c in range(enemy_board.size)
+            if (r, c) not in enemy_board._shots
+        ]
+        if not candidates:
+            raise ValueError("Нет доступных клеток для выстрела.")
+        return random.choice(candidates)
