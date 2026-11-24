@@ -1,0 +1,10 @@
+from game import Game
+
+
+def main():
+    game = Game(board_size=6)
+    game.run()
+
+
+if __name__ == "__main__":
+    main()
