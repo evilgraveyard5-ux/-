@@ -1,0 +1,988 @@
+exc.py
+class ProjectError(Exception):
+    """Базовое исключение проекта."""
+
+
+class OutOfStockError(ProjectError):
+    """Недостаточно товара на складе."""
+
+
+class InvalidCommandError(ProjectError):
+    """Неизвестная команда или некорректные аргументы."""
+
+
+class ReturnError(ProjectError):
+    """Ошибка при возврате товара."""
+
+
+class ShopStateError(ProjectError):
+    """Недопустимое состояние магазина или операции."""
+
+## mod.py
+from __future__ import annotations
+from abc import ABC, abstractmethod
+from datetime import datetime
+
+from exc import OutOfStockError, ShopStateError
+
+
+class Product(ABC):
+    """Базовый товар (наследование: Product -> Food -> PerishableFood, Electronics)."""
+
+    def __init__(self, sku: str, name: str, price: float, stock: int, tax_rate: float = 0.12):
+        self._sku = self._validate_non_empty(sku, "SKU")
+        self._name = self._validate_non_empty(name, "Название")
+        self.price = price
+        self.stock = stock
+        self._tax_rate = float(tax_rate)
+
+    @staticmethod
+    def _validate_non_empty(value: str, field_name: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field_name} не может быть пустым.")
+        return value.strip()
+
+    @property
+    def sku(self) -> str:
+        return self._sku
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def price(self) -> float:
+        return self._price
+
+    @price.setter
+    def price(self, value: float) -> None:
+        val = float(value)
+        if val <= 0:
+            raise ValueError("Цена должна быть больше нуля.")
+        self._price = round(val, 2)
+
+    @property
+    def stock(self) -> int:
+        return self._stock
+
+    @stock.setter
+    def stock(self, value: int) -> None:
+        val = int(value)
+        if val < 0:
+            raise ValueError("Остаток на складе не может быть отрицательным.")
+        self._stock = val
+
+    @property
+    def tax_rate(self) -> float:
+        return self._tax_rate
+
+    def adjust_price(self, factor: float) -> None:
+        self.price = self._price * factor
+
+    def reserve(self, qty: int) -> None:
+        if qty <= 0:
+            raise ValueError("Количество должно быть положительным.")
+        if self._stock < qty:
+            raise OutOfStockError(f"На складе '{self._name}' доступно {self._stock}, запрошено {qty}.")
+        self._stock -= qty
+
+    def release(self, qty: int) -> None:
+        if qty <= 0:
+            raise ValueError("Количество должно быть положительным.")
+        self._stock += qty
+
+    @abstractmethod
+    def category(self) -> str:
+        pass
+
+    def describe(self) -> str:
+        return (
+            f"[{self.category()}] {self._name} ({self._sku}) — {self._price:.2f} "
+            f"(остаток: {self._stock}, налог: {self._tax_rate*100:.0f}%)"
+        )
+
+    def __str__(self) -> str:
+        return self.describe()
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Product):
+            return NotImplemented
+        return self._sku == other._sku
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, Product):
+            return NotImplemented
+        return self._price < other._price
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.__class__.__name__,
+            "sku": self._sku,
+            "name": self._name,
+            "price": self._price,
+            "stock": self._stock,
+            "tax_rate": self._tax_rate,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Product:
+        ptype = data.get("type", "Food")
+        mapping = {
+            "Food": Food,
+            "PerishableFood": PerishableFood,
+            "Electronics": Electronics,
+        }
+        target_cls = mapping.get(ptype, Food)
+        if target_cls is PerishableFood:
+            return PerishableFood(
+                data["sku"],
+                data["name"],
+                data["price"],
+                data["stock"],
+                shelf_life_days=data.get("shelf_life_days", 7),
+                tax_rate=data.get("tax_rate", 0.05),
+            )
+        if target_cls is Electronics:
+            return Electronics(
+                data["sku"],
+                data["name"],
+                data["price"],
+                data["stock"],
+                warranty_months=data.get("warranty_months", 12),
+                tax_rate=data.get("tax_rate", 0.16),
+            )
+        return Food(
+            data["sku"],
+            data["name"],
+            data["price"],
+            data["stock"],
+            tax_rate=data.get("tax_rate", 0.05),
+        )
+
+
+class Food(Product):
+    def __init__(self, sku: str, name: str, price: float, stock: int, tax_rate: float = 0.05):
+        super().__init__(sku, name, price, stock, tax_rate=tax_rate)
+
+    def category(self) -> str:
+        return "Продукты"
+
+
+class PerishableFood(Food):
+    """Второй уровень наследования: Product -> Food -> PerishableFood."""
+
+    def __init__(self, sku: str, name: str, price: float, stock: int, shelf_life_days: int = 5, tax_rate: float = 0.05):
+        super().__init__(sku, name, price, stock, tax_rate=tax_rate)
+        self.__shelf_life_days = max(1, int(shelf_life_days))
+
+    @property
+    def shelf_life_days(self) -> int:
+        return self.__shelf_life_days
+
+    def category(self) -> str:
+        return f"Скоропортящееся ({self.__shelf_life_days} дн.)"
+
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d["shelf_life_days"] = self.__shelf_life_days
+        return d
+
+
+class Electronics(Product):
+    def __init__(self, sku: str, name: str, price: float, stock: int, warranty_months: int = 12, tax_rate: float = 0.16):
+        super().__init__(sku, name, price, stock, tax_rate=tax_rate)
+        self._warranty_months = max(0, int(warranty_months))
+
+    def category(self) -> str:
+        return f"Электроника (гарантия {self._warranty_months} мес.)"
+
+    def to_dict(self) -> dict:
+        d = super().to_dict()
+        d["warranty_months"] = self._warranty_months
+        return d
+
+
+class Cart:
+    """Корзина покупателя с магическими методами."""
+
+    def __init__(self):
+        self._items: dict[str, tuple[Product, int]] = {}
+
+    def add(self, product: Product, qty: int = 1) -> None:
+        if qty <= 0:
+            raise ValueError("Количество должно быть больше нуля.")
+        product.reserve(qty)
+        if product.sku in self._items:
+            _, cur_qty = self._items[product.sku]
+            self._items[product.sku] = (product, cur_qty + qty)
+        else:
+            self._items[product.sku] = (product, qty)
+
+    def remove(self, sku: str, qty: int = 1) -> int:
+        if sku not in self._items:
+            raise KeyError(f"Товара '{sku}' нет в корзине.")
+        product, cur_qty = self._items[sku]
+        if qty <= 0 or qty > cur_qty:
+            raise ValueError("Некорректное количество для удаления из корзины.")
+        product.release(qty)
+        if cur_qty == qty:
+            del self._items[sku]
+        else:
+            self._items[sku] = (product, cur_qty - qty)
+        return qty
+
+    def clear(self) -> None:
+        self._items.clear()
+
+    def items_list(self) -> list[tuple[Product, int]]:
+        return list(self._items.values())
+
+    def subtotal(self) -> float:
+        return round(sum(p.price * q for p, q in self._items.values()), 2)
+
+    def __len__(self) -> int:
+        return sum(q for _, q in self._items.values())
+
+    def __iter__(self):
+        return iter(self._items.values())
+
+    def __contains__(self, sku: object) -> bool:
+        return sku in self._items
+
+    def __add__(self, other: Cart) -> Cart:
+        if not isinstance(other, Cart):
+            return NotImplemented
+        merged = Cart()
+        for p, q in self._items.values():
+            merged._items[p.sku] = (p, q)
+        for p, q in other._items.values():
+            if p.sku in merged._items:
+                ep, eq = merged._items[p.sku]
+                merged._items[p.sku] = (ep, eq + q)
+            else:
+                merged._items[p.sku] = (p, q)
+        return merged
+
+    def __str__(self) -> str:
+        if not self._items:
+            return "Корзина пуста."
+        lines = [f"  - {p.name} ({p.sku}) x{q} = {p.price * q:.2f}" for p, q in self._items.values()]
+        lines.append(f"Итого без скидок и налогов: {self.subtotal():.2f}")
+        return "\n".join(lines)
+
+    def to_dict(self) -> dict:
+        return {
+            "items": [
+                {"sku": p.sku, "qty": q}
+                for p, q in self._items.values()
+            ]
+        }
+
+
+class Customer:
+    """Покупатель и история его чеков."""
+
+    def __init__(self, name: str, balance: float = 100000.0):
+        self._name = name
+        self._balance = float(balance)
+        self._receipts: list[Receipt] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def balance(self) -> float:
+        return self._balance
+
+    @property
+    def receipts(self) -> list[Receipt]:
+        return self._receipts
+
+    def charge(self, amount: float) -> None:
+        if amount < 0:
+            raise ValueError("Сумма списания не может быть отрицательной.")
+        if self._balance < amount:
+            raise ShopStateError(f"Недостаточно средств: баланс {self._balance:.2f}, нужно {amount:.2f}.")
+        self._balance = round(self._balance - amount, 2)
+
+    def refund(self, amount: float) -> None:
+        if amount < 0:
+            raise ValueError("Сумма возврата не может быть отрицательной.")
+        self._balance = round(self._balance + amount, 2)
+
+    def add_receipt(self, receipt: Receipt) -> None:
+        self._receipts.append(receipt)
+
+    def __str__(self) -> str:
+        return f"Покупатель: {self._name} | Баланс: {self._balance:.2f} | Чеков: {len(self._receipts)}"
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self._name,
+            "balance": self._balance,
+            "receipts": [r.to_dict() for r in self._receipts],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Customer:
+        cust = cls(data.get("name", "Гость"), data.get("balance", 100000.0))
+        cust._receipts = [Receipt.from_dict(r) for r in data.get("receipts", [])]
+        return cust
+
+
+class Receipt:
+    """Чек с разбивкой по позициям, скидке и налогам."""
+
+    def __init__(
+        self,
+        receipt_id: int,
+        customer_name: str,
+        lines: list[dict],
+        promo_name: str,
+        discount_total: float,
+        tax_total: float,
+        grand_total: float,
+        created_at: str | None = None,
+    ):
+        self.receipt_id = receipt_id
+        self.customer_name = customer_name
+        self.lines = lines
+        self.promo_name = promo_name
+        self.discount_total = round(discount_total, 2)
+        self.tax_total = round(tax_total, 2)
+        self.grand_total = round(grand_total, 2)
+        self.created_at = created_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.returned_qty: dict[str, int] = {}
+
+    def __str__(self) -> str:
+        out = [
+            f"=== ЧЕК #{self.receipt_id} ({self.created_at}) ===",
+            f"Покупатель: {self.customer_name}",
+        ]
+        for ln in self.lines:
+            ret = self.returned_qty.get(ln["sku"], 0)
+            ret_str = f" [возвращено: {ret}]" if ret else ""
+            out.append(
+                f"  {ln['name']} ({ln['sku']}) | {ln['qty']} шт. x {ln['unit_price']:.2f} "
+                f"= {ln['line_sum']:.2f} | налог: {ln['tax_amount']:.2f}{ret_str}"
+            )
+        out.append(f"Акция: {self.promo_name} | Скидка: -{self.discount_total:.2f}")
+        out.append(f"Итого налоги: {self.tax_total:.2f}")
+        out.append(f"К ОПЛАТЕ: {self.grand_total:.2f}")
+        return "\n".join(out)
+
+    def to_dict(self) -> dict:
+        return {
+            "receipt_id": self.receipt_id,
+            "customer_name": self.customer_name,
+            "lines": self.lines,
+            "promo_name": self.promo_name,
+            "discount_total": self.discount_total,
+            "tax_total": self.tax_total,
+            "grand_total": self.grand_total,
+            "created_at": self.created_at,
+            "returned_qty": self.returned_qty,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Receipt:
+        r = cls(
+            receipt_id=data["receipt_id"],
+            customer_name=data["customer_name"],
+            lines=data["lines"],
+            promo_name=data.get("promo_name", "Без акции"),
+            discount_total=data.get("discount_total", 0.0),
+            tax_total=data.get("tax_total", 0.0),
+            grand_total=data.get("grand_total", 0.0),
+            created_at=data.get("created_at"),
+        )
+        r.returned_qty = dict(data.get("returned_qty", {}))
+        return r
+
+osn.py
+from shp import Shop
+
+
+def main() -> None:
+    app = Shop(name="MagKeeper")
+    app.run()
+
+
+if __name__ == "__main__":
+    main()
+
+promotions.py
+from __future__ import annotations
+from abc import ABC, abstractmethod
+
+from mod import Product
+
+
+class Promotion(ABC):
+    """Абстрактная акция: вычисляет размер скидки для набора позиций (product, qty)."""
+
+    def __init__(self, name: str):
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @abstractmethod
+    def discount_amount(self, items: list[tuple[Product, int]]) -> float:
+        pass
+
+    def __str__(self) -> str:
+        return f"Акция '{self._name}'"
+
+
+class DiscountPromotion(Promotion):
+    """Процентная скидка на весь заказ при сумме от min_sum."""
+
+    def __init__(self, name: str, percent: float, min_sum: float = 0.0):
+        super().__init__(name)
+        self._percent = float(percent)
+        self._min_sum = float(min_sum)
+
+    def discount_amount(self, items: list[tuple[Product, int]]) -> float:
+        subtotal = sum(p.price * q for p, q in items)
+        if subtotal < self._min_sum:
+            return 0.0
+        return round(subtotal * (self._percent / 100.0), 2)
+
+
+class TwoForOnePromotion(Promotion):
+    """Каждый второй экземпляр конкретного SKU — со скидкой 100% (2 по цене 1)."""
+
+    def __init__(self, name: str, target_sku: str):
+        super().__init__(name)
+        self._target_sku = target_sku
+
+    def discount_amount(self, items: list[tuple[Product, int]]) -> float:
+        discount = 0.0
+        for product, qty in items:
+            if product.sku == self._target_sku and qty >= 2:
+                free_units = qty // 2
+                discount += free_units * product.price
+        return round(discount, 2)
+
+
+class BundlePromotion(Promotion):
+    """Скидка при одновременной покупке всех SKU из набора."""
+
+    def __init__(self, name: str, required_skus: set[str], bundle_discount: float):
+        super().__init__(name)
+        self._required_skus = set(required_skus)
+        self._bundle_discount = float(bundle_discount)
+
+    def discount_amount(self, items: list[tuple[Product, int]]) -> float:
+        present = {p.sku for p, q in items if q > 0}
+        if self._required_skus.issubset(present):
+            subtotal = sum(p.price * q for p, q in items)
+            return round(min(self._bundle_discount, subtotal), 2)
+        return 0.0
+
+shp.py
+from __future__ import annotations
+import json
+from datetime import datetime
+from pathlib import Path
+
+from exc import (
+    InvalidCommandError,
+    OutOfStockError,
+    ProjectError,
+    ReturnError,
+    ShopStateError,
+)
+from mod import Cart, Customer, Electronics, Food, PerishableFood, Product, Receipt
+from promotions import BundlePromotion, DiscountPromotion, Promotion, TwoForOnePromotion
+
+
+class Shop:
+    """Главный класс-система магазина (композиция)."""
+
+    SAVE_FILE = Path("shop_state.json")
+    LOG_FILE = Path("shop.log")
+
+    def __init__(self, name: str = "MagKeeper"):
+        self._name = name
+        self._tick = 0
+        self._catalog: dict[str, Product] = {}
+        self._cart = Cart()
+        self._customer = Customer("Покупатель", balance=250000.0)
+        self._promotions: list[Promotion] = [
+            DiscountPromotion("Скидка 10% от 5000", percent=10.0, min_sum=5000.0),
+            TwoForOnePromotion("2 по цене 1 на хлеб", target_sku="F1"),
+            BundlePromotion("Набор: хлеб + мышь ATK (-500)", required_skus={"F1", "E1"}, bundle_discount=500.0),
+        ]
+        self._commands: dict[str, tuple[callable, str]] = {
+            "help": (self.cmd_help, "Показать список команд"),
+            "catalog": (self.cmd_catalog, "Показать товары и остатки на складе"),
+            "add": (self.cmd_add, "Добавить в корзину: add <sku> <кол-во>"),
+            "remove": (self.cmd_remove, "Убрать из корзины: remove <sku> <кол-во>"),
+            "cart": (self.cmd_cart, "Показать корзину"),
+            "promo": (self.cmd_promo, "Показать лучшую акцию для текущей корзины"),
+            "buy": (self.cmd_buy, "Оформить покупку и сформировать чек"),
+            "receipts": (self.cmd_receipts, "Показать чеки покупателя"),
+            "return": (self.cmd_return, "Возврат товара по чеку: return <id_чека> <sku> <кол-во>"),
+            "tick": (self.cmd_tick, "Продвинуть время мира на N тактов: tick [N]"),
+            "save": (self.cmd_save, "Сохранить состояние в JSON"),
+            "load": (self.cmd_load, "Загрузить состояние из JSON"),
+            "demo": (self.cmd_demo, "Автоматический прогон демонстрационных команд"),
+            "exit": (self.cmd_exit, "Сохранить и выйти"),
+        }
+
+        if self.SAVE_FILE.exists():
+            try:
+                self.load_from_file(self.SAVE_FILE)
+            except Exception as exc:
+                self._log(f"Ошибка автозагрузки: {exc}")
+                self._seed_default_catalog()
+        else:
+            self._seed_default_catalog()
+
+    def _seed_default_catalog(self) -> None:
+        self._catalog = {
+            # Food (20 товаров)
+            "F1": Food("F1", "Таджикский хлеб", 300.0, 25, tax_rate=0.05),
+            "F2": Food("F2", "Таблетки для мотивации", 1990.0, 15, tax_rate=0.05),
+            "F3": Food("F3", "Печенье Дедлайн не страшен", 550.0, 30, tax_rate=0.05),
+            "F4": Food("F4", "Дошик со вкусом сдачи рубежки", 280.0, 40, tax_rate=0.05),
+            "F5": Food("F5", "Кофе Ночной коммит 250г", 2400.0, 14, tax_rate=0.05),
+            "F6": Food("F6", "Энергетик Батарейка 200%", 590.0, 35, tax_rate=0.05),
+            "F7": Food("F7", "Чипсы со вкусом шашлыка и пятницы", 750.0, 22, tax_rate=0.05),
+            "F8": Food("F8", "Шоколад Антистресс ", 820.0, 18, tax_rate=0.05),
+            "F9": Food("F9", "Орешки для разгона оперативки в мозгу", 1450.0, 16, tax_rate=0.05),
+            "F10": Food("F10", "Чай Узбокойся и отдохни", 950.0, 20, tax_rate=0.05),
+            "F11": Food("F11", "Мармеладные конфеты со вкусом костылей", 430.0, 28, tax_rate=0.05),
+            "F12": Food("F12", "Протеин Качалка вместо сна", 680.0, 24, tax_rate=0.05),
+            "F13": Food("F13", "Сухарики Три корочки для студента", 250.0, 45, tax_rate=0.05),
+            "F14": Food("F14", "Мёд горный алматинский от лени", 2100.0, 10, tax_rate=0.05),
+            "F15": Food("F15", "Какао Режим пледа активирован", 1100.0, 15, tax_rate=0.05),
+            "F16": Food("F16", "Семечки Пощелкать", 390.0, 32, tax_rate=0.05),
+            "F17": Food("F17", "Кола без сахара но с надеждой", 480.0, 30, tax_rate=0.05),
+            "F18": Food("F18", "Сироп от выгорания со вкусом вишни", 1290.0, 19, tax_rate=0.05),
+            "F19": Food("F19", "Попкорн для просмотра игры престолов", 540.0, 21, tax_rate=0.05),
+            "F20": Food("F20", "Жвачка Свежесть на устном зачете", 220.0, 50, tax_rate=0.05),
+
+            # PerishableFood (15 товаров)
+            "P1": PerishableFood("P1", "Йогурт фермерский Утренний", 450.0, 12, shelf_life_days=4, tax_rate=0.05),
+            "P2": PerishableFood("P2", "Растишка для роста", 650.0, 18, shelf_life_days=6, tax_rate=0.05),
+            "P3": PerishableFood("P3", "Смузи Анти-сон в 3 часа ночи", 890.0, 10, shelf_life_days=3, tax_rate=0.05),
+            "P4": PerishableFood("P4", "Самса с курицей на обед", 420.0, 16, shelf_life_days=2, tax_rate=0.05),
+            "P5": PerishableFood("P5", "Сэндвич Перекус между парами", 1150.0, 14, shelf_life_days=3, tax_rate=0.05),
+            "P6": PerishableFood("P6", "Онигири с лососем из круглосуточного", 790.0, 15, shelf_life_days=2, tax_rate=0.05),
+            "P7": PerishableFood("P7", "Сырники как у бабушки", 980.0, 11, shelf_life_days=4, tax_rate=0.05),
+            "P8": PerishableFood("P8", "Молоко отборное для хлопьев", 560.0, 20, shelf_life_days=5, tax_rate=0.05),
+            "P9": PerishableFood("P9", "Кефир После тяжелой смены", 490.0, 17, shelf_life_days=5, tax_rate=0.05),
+            "P10": PerishableFood("P10", "Творог Масса сама себя не наберет", 720.0, 13, shelf_life_days=5, tax_rate=0.05),
+            "P11": PerishableFood("P11", "Круассан с шоколадом утренний", 530.0, 18, shelf_life_days=2, tax_rate=0.05),
+            "P12": PerishableFood("P12", "Салат Цезарь на богатом", 1350.0, 9, shelf_life_days=2, tax_rate=0.05),
+            "P13": PerishableFood("P13", "Пицца пепперони на одного", 1490.0, 8, shelf_life_days=3, tax_rate=0.05),
+            "P14": PerishableFood("P14", "Морс клюквенный Живая вода", 510.0, 16, shelf_life_days=4, tax_rate=0.05),
+            "P15": PerishableFood("P15", "Тирамису Награда за закрытую работу", 1190.0, 10, shelf_life_days=3, tax_rate=0.05),
+
+            # Electronics (15 товаров)
+            "E1": Electronics("E1", "Беспроводная мышь ATK", 5400.0, 8, warranty_months=24, tax_rate=0.16),
+            "E2": Electronics("E2", "Механическая клавиатура Ajazz 820AK Pro", 12500.0, 6, warranty_months=12, tax_rate=0.16),
+            "E3": Electronics("E3", "RGB-подставка под кружку с подогревом", 3200.0, 9, warranty_months=12, tax_rate=0.16),
+            "E4": Electronics("E4", "Генератор белого шума Тишина в общаге", 4100.0, 7, warranty_months=12, tax_rate=0.16),
+            "E5": Electronics("E5", "Белый коврик для мыши XXL 900x400", 3900.0, 12, warranty_months=6, tax_rate=0.16),
+            "E6": Electronics("E6", "Наушники с шумодавом от соседей", 18900.0, 5, warranty_months=12, tax_rate=0.16),
+            "E7": Electronics("E7", "USB-хаб на все случаи жизни 7-в-1", 7400.0, 10, warranty_months=12, tax_rate=0.16),
+            "E8": Electronics("E8", "Лампа на монитор для ночных каток", 8600.0, 7, warranty_months=12, tax_rate=0.16),
+            "E9": Electronics("E9", "Павербанк Кирпич на 20000 mAh", 14200.0, 8, warranty_months=18, tax_rate=0.16),
+            "E10": Electronics("E10", "Белый кабель Type-C в оплетке 2м", 2300.0, 20, warranty_months=12, tax_rate=0.16),
+            "E11": Electronics("E11", "Флешка с рефератами на 128 ГБ", 4500.0, 15, warranty_months=24, tax_rate=0.16),
+            "E12": Electronics("E12", "Вебка со шторкой для созвонов", 11200.0, 6, warranty_months=12, tax_rate=0.16),
+            "E13": Electronics("E13", "Микрофон на пантографе как у стримера", 15800.0, 5, warranty_months=12, tax_rate=0.16),
+            "E14": Electronics("E14", "USB-вентилятор Охлаждение пукана", 2900.0, 14, warranty_months=6, tax_rate=0.16),
+            "E15": Electronics("E15", "Щеточка для чистки клавы от крошек", 1850.0, 25, warranty_months=6, tax_rate=0.16),
+        }
+
+    def _log(self, message: str) -> None:
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self.LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(f"[{stamp}] [tick={self._tick}] {message}\n")
+
+    def _advance_tick(self, steps: int = 1) -> None:
+        for _ in range(max(1, steps)):
+            self._tick += 1
+            if self._tick % 3 == 0 and "E1" in self._catalog:
+                self._catalog["E1"].adjust_price(1.02)
+                msg = f"Событие мира: инфляция подняла цену на {self._catalog['E1'].name} (+2%)."
+                self._log(msg)
+                print(f"[Событие] {msg}")
+            if self._tick % 5 == 0 and "P2" in self._catalog:
+                self._catalog["P2"].release(3)
+                msg = f"Событие мира: поставка +3 шт. {self._catalog['P2'].name} на склад."
+                self._log(msg)
+                print(f"[Событие] {msg}")
+
+    def select_best_promotion(self, items: list[tuple[Product, int]]) -> tuple[Promotion | None, float]:
+        best_promo: Promotion | None = None
+        best_discount = 0.0
+        for promo in self._promotions:
+            disc = promo.discount_amount(items)
+            if disc > best_discount:
+                best_discount = disc
+                best_promo = promo
+        return best_promo, round(best_discount, 2)
+
+    def cmd_help(self, args: list[str]) -> None:
+        print("\n=== КОМАНДЫ МАГАЗИНА ===")
+        for cmd, (_, desc) in self._commands.items():
+            print(f"  {cmd:<10} — {desc}")
+
+    def cmd_catalog(self, args: list[str]) -> None:
+        print(f"\n=== КАТАЛОГ И СКЛАД (всего позиций: {len(self._catalog)}) ===")
+        for prod in sorted(self._catalog.values()):
+            print(" ", prod.describe())
+
+    def cmd_add(self, args: list[str]) -> None:
+        if len(args) != 2:
+            raise InvalidCommandError("Использование: add <sku> <кол-во>")
+        sku = args[0].upper()
+        if sku not in self._catalog:
+            raise InvalidCommandError(f"Товар с кодом {sku} не найден.")
+        try:
+            qty = int(args[1])
+        except ValueError as exc:
+            raise InvalidCommandError("Количество должно быть целым числом.") from exc
+        self._cart.add(self._catalog[sku], qty)
+        self._log(f"Добавлено в корзину: {sku} x{qty}")
+        print(f"Добавлено в корзину: {self._catalog[sku].name} x{qty}")
+
+    def cmd_remove(self, args: list[str]) -> None:
+        if len(args) != 2:
+            raise InvalidCommandError("Использование: remove <sku> <кол-во>")
+        sku = args[0].upper()
+        try:
+            qty = int(args[1])
+        except ValueError as exc:
+            raise InvalidCommandError("Количество должно быть целым числом.") from exc
+        try:
+            removed = self._cart.remove(sku, qty)
+        except (KeyError, ValueError) as exc:
+            raise InvalidCommandError(str(exc)) from exc
+        self._log(f"Удалено из корзины: {sku} x{removed}")
+        print(f"Убрано из корзины: {sku} x{removed}")
+
+    def cmd_cart(self, args: list[str]) -> None:
+        print("\n=== КОРЗИНА ===")
+        print(self._cart)
+
+    def cmd_promo(self, args: list[str]) -> None:
+        items = self._cart.items_list()
+        promo, disc = self.select_best_promotion(items)
+        if promo is None or disc <= 0:
+            print("Подходящих акций пока нет (скидка 0.00).")
+        else:
+            print(f"Лучшая акция: {promo.name} -> скидка {disc:.2f}")
+
+    def cmd_buy(self, args: list[str]) -> None:
+        items = self._cart.items_list()
+        if not items:
+            raise ShopStateError("Корзина пуста. Сначала добавьте товар командой add.")
+
+        promo, discount_total = self.select_best_promotion(items)
+        subtotal = self._cart.subtotal()
+        promo_ratio = (discount_total / subtotal) if subtotal > 0 else 0.0
+
+        lines = []
+        tax_total = 0.0
+        for prod, qty in items:
+            raw_line = prod.price * qty
+            discounted_line = raw_line * (1.0 - promo_ratio)
+            line_tax = round(discounted_line * prod.tax_rate, 2)
+            tax_total += line_tax
+            lines.append({
+                "sku": prod.sku,
+                "name": prod.name,
+                "qty": qty,
+                "unit_price": prod.price,
+                "line_sum": round(raw_line, 2),
+                "tax_amount": line_tax,
+            })
+
+        tax_total = round(tax_total, 2)
+        grand_total = round(max(0.0, subtotal - discount_total + tax_total), 2)
+
+        self._customer.charge(grand_total)
+        receipt_id = len(self._customer.receipts) + 1
+        receipt = Receipt(
+            receipt_id=receipt_id,
+            customer_name=self._customer.name,
+            lines=lines,
+            promo_name=promo.name if promo and discount_total > 0 else "Без акции",
+            discount_total=discount_total,
+            tax_total=tax_total,
+            grand_total=grand_total,
+        )
+        self._customer.add_receipt(receipt)
+        self._cart.clear()
+        self._log(f"Оформлен чек #{receipt_id} на сумму {grand_total:.2f}")
+        print("\n" + str(receipt))
+
+    def cmd_receipts(self, args: list[str]) -> None:
+        if not self._customer.receipts:
+            print("Чеков пока нет.")
+            return
+        for r in self._customer.receipts:
+            print("\n" + str(r))
+
+    def cmd_return(self, args: list[str]) -> None:
+        if len(args) != 3:
+            raise InvalidCommandError("Использование: return <id_чека> <sku> <кол-во>")
+        try:
+            rec_id = int(args[0])
+            qty = int(args[2])
+        except ValueError as exc:
+            raise InvalidCommandError("ID чека и количество должны быть целыми числами.") from exc
+        sku = args[1].upper()
+        if qty <= 0:
+            raise ReturnError("Количество для возврата должно быть больше нуля.")
+
+        receipt = next((r for r in self._customer.receipts if r.receipt_id == rec_id), None)
+        if receipt is None:
+            raise ReturnError(f"Чек #{rec_id} не найден.")
+
+        line = next((ln for ln in receipt.lines if ln["sku"] == sku), None)
+        if line is None:
+            raise ReturnError(f"Товар {sku} отсутствует в чеке #{rec_id}.")
+
+        already_returned = receipt.returned_qty.get(sku, 0)
+        if already_returned + qty > line["qty"]:
+            raise ReturnError(
+                f"Нельзя вернуть {qty} шт. {sku}: куплено {line['qty']}, уже возвращено {already_returned}."
+            )
+
+        receipt.returned_qty[sku] = already_returned + qty
+        if sku in self._catalog:
+            self._catalog[sku].release(qty)
+
+        per_unit_gross = (line["line_sum"] + line["tax_amount"]) / line["qty"]
+        refund_sum = round(per_unit_gross * qty, 2)
+        self._customer.refund(refund_sum)
+        self._log(f"Возврат по чеку #{rec_id}: {sku} x{qty}, возвращено средств {refund_sum:.2f}")
+        print(f"Возврат выполнен: {sku} x{qty}. На баланс возвращено {refund_sum:.2f}.")
+
+    def cmd_tick(self, args: list[str]) -> None:
+        steps = 1
+        if args:
+            try:
+                steps = int(args[0])
+            except ValueError as exc:
+                raise InvalidCommandError("Число тактов должно быть целым.") from exc
+        self._advance_tick(steps)
+        print(f"Текущий такт мира: {self._tick}")
+
+    def cmd_save(self, args: list[str]) -> None:
+        self.save_to_file(self.SAVE_FILE)
+        print(f"Состояние сохранено в {self.SAVE_FILE}")
+
+    def cmd_load(self, args: list[str]) -> None:
+        self.load_from_file(self.SAVE_FILE)
+        print(f"Состояние загружено из {self.SAVE_FILE}")
+
+    def cmd_demo(self, args: list[str]) -> None:
+        demo_commands = [
+            "catalog",
+            "add F2 1",
+            "add P2 2",
+            "add E2 1",
+            "promo",
+            "cart",
+            "buy",
+            "tick 3",
+            "return 1 P2 1",
+            "receipts",
+        ]
+        print("\n=== ЗАПУСК DEMO ===")
+        for line in demo_commands:
+            print(f"\n[demo] > {line}")
+            self.execute(line, advance_world=False)
+
+    def cmd_exit(self, args: list[str]) -> bool:
+        self.save_to_file(self.SAVE_FILE)
+        self._log("Выход из программы с сохранением.")
+        print("Состояние сохранено. До встречи!")
+        return True
+
+    def execute(self, raw_line: str, advance_world: bool = True) -> bool:
+        parts = raw_line.strip().split()
+        if not parts:
+            return False
+        cmd_name = parts[0].lower()
+        args = parts[1:]
+        if cmd_name not in self._commands:
+            raise InvalidCommandError(f"Неизвестная команда {cmd_name}. Введите help.")
+        handler, _ = self._commands[cmd_name]
+        should_exit = bool(handler(args))
+        if advance_world and cmd_name not in ("exit", "save", "load", "help"):
+            self._advance_tick(1)
+        return should_exit
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self._name,
+            "tick": self._tick,
+            "catalog": {sku: p.to_dict() for sku, p in self._catalog.items()},
+            "cart": self._cart.to_dict(),
+            "customer": self._customer.to_dict(),
+        }
+
+    def save_to_file(self, path: Path) -> None:
+        path.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        self._log(f"Сохранение в {path}")
+
+    def load_from_file(self, path: Path) -> None:
+        if not path.exists():
+            raise ShopStateError(f"Файл сохранения {path} не найден.")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self._name = data.get("name", self._name)
+        self._tick = int(data.get("tick", 0))
+        self._catalog = {
+            sku: Product.from_dict(p_data)
+            for sku, p_data in data.get("catalog", {}).items()
+        }
+        self._customer = Customer.from_dict(data.get("customer", {}))
+        self._cart = Cart()
+        for item in data.get("cart", {}).get("items", []):
+            sku = item["sku"]
+            if sku in self._catalog:
+                self._cart.add(self._catalog[sku], int(item["qty"]))
+        self._log(f"Загрузка из {path}")
+
+    def __str__(self) -> str:
+        return f"Магазин {self._name} (такт={self._tick}, товаров={len(self._catalog)}, {self._customer})"
+
+    def run(self) -> None:
+        print(f"=== {self._name.upper()} ===")
+        print("Введите help для списка команд.")
+        while True:
+            try:
+                line = input("\n> ")
+                if self.execute(line):
+                    break
+            except ProjectError as err:
+                print(f"[Ошибка]: {err}")
+            except ValueError as err:
+                print(f"[Ошибка значения]: {err}")
+            except Exception as err:
+                self._log(f"Непредвиденная ошибка: {err}")
+                print(f"[Непредвиденная ошибка]: {err}")
+
+tests.py
+from pathlib import Path
+import tempfile
+
+from exc import InvalidCommandError, OutOfStockError, ReturnError, ShopStateError
+from mod import Cart, Electronics, Food, PerishableFood
+from shp import Shop
+
+
+def run_all_tests() -> None:
+    # 1. Наследование (включая 2 уровня: Product -> Food -> PerishableFood) и @property
+    yogurt = PerishableFood("P9", "Йогурт", 200.0, 5, shelf_life_days=3)
+    assert isinstance(yogurt, Food)
+    assert yogurt.shelf_life_days == 3
+    assert yogurt.stock == 5
+
+    # 2. Магические методы __eq__, __lt__ на товарах
+    bread = Food("F9", "Хлеб", 150.0, 10)
+    mouse = Electronics("E9", "Мышь", 3000.0, 4)
+    assert bread < mouse
+    assert bread == Food("F9", "Другое имя", 999.0, 1)
+
+    # 3. Магические методы корзины (__len__, __contains__, __add__)
+    c1 = Cart()
+    c2 = Cart()
+    c1.add(bread, 2)
+    c2.add(mouse, 1)
+    c3 = c1 + c2
+    assert len(c3) == 3
+    assert "F9" in c3
+    assert "E9" in c3
+
+    # 4. Покупка, автовыбор акции, чек и налоги
+    with tempfile.TemporaryDirectory() as tmp:
+        s = Shop("TestShop")
+        s.SAVE_FILE = Path(tmp) / "state.json"
+        s.LOG_FILE = Path(tmp) / "shop.log"
+        s._seed_default_catalog()
+        s._customer = s._customer.__class__("Тест", balance=50000.0)
+        s._cart = Cart()
+
+        s.execute("add F1 2", advance_world=False)
+        s.execute("add E1 1", advance_world=False)
+        s.execute("buy", advance_world=False)
+        assert len(s._customer.receipts) == 1
+        rec = s._customer.receipts[0]
+        assert rec.grand_total > 0
+        assert rec.tax_total > 0
+
+        # 5. Корректный возврат товара
+        prev_balance = s._customer.balance
+        prev_stock = s._catalog["F1"].stock
+        s.execute("return 1 F1 1", advance_world=False)
+        assert s._customer.balance > prev_balance
+        assert s._catalog["F1"].stock == prev_stock + 1
+
+        # 6. Сохранение и загрузка JSON
+        s.execute("save", advance_world=False)
+        assert s.SAVE_FILE.exists()
+        s2 = Shop("TestShop2")
+        s2.SAVE_FILE = s.SAVE_FILE
+        s2.LOG_FILE = s.LOG_FILE
+        s2.load_from_file(s.SAVE_FILE)
+        assert s2._customer.balance == s._customer.balance
+        assert len(s2._customer.receipts) == 1
+
+        # 7. Команда demo работает без ошибок
+        s2.execute("demo", advance_world=False)
+        assert len(s2._customer.receipts) >= 2
+
+        # 8. Негативный тест: нехватка остатков на складе
+        try:
+            s2.execute("add E2 999", advance_world=False)
+            assert False, "Ожидался OutOfStockError"
+        except OutOfStockError:
+            pass
+
+        # 9. Негативный тест: возврат больше купленного
+        try:
+            s2.execute("return 1 F1 99", advance_world=False)
+            assert False, "Ожидался ReturnError"
+        except ReturnError:
+            pass
+
+        # 10. Негативный тест: неизвестная команда
+        try:
+            s2.execute("unknown_cmd", advance_world=False)
+            assert False, "Ожидался InvalidCommandError"
+        except InvalidCommandError:
+            pass
+
+        # 11. Негативный тест: некорректный ввод числа
+        try:
+            s2.execute("add F1 abc", advance_world=False)
+            assert False, "Ожидался InvalidCommandError"
+        except InvalidCommandError:
+            pass
+
+        # 12. Негативный тест: покупка при пустой корзине
+        s2._cart = Cart()
+        try:
+            s2.execute("buy", advance_world=False)
+            assert False, "Ожидался ShopStateError"
+        except ShopStateError:
+            pass
+
+    print("Все 12 тестов успешно пройдены!")
+
+
+if __name__ == "__main__":
+    run_all_tests()
